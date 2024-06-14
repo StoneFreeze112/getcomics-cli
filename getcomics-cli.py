@@ -6,7 +6,7 @@ import os
 import subprocess
 
 # Constants
-SEARCH_URL_TEMPLATE = "https://getcomics.org/page/{}/?s={}"
+SEARCH_URL_TEMPLATE = "https://getcomics.org/?s={}"
 YEAR_PATTERN = re.compile(r'\b(19|20)\d{2}\b')
 SPECIAL_CASES = {
     "spider man": "Spider-Man",
@@ -24,7 +24,6 @@ def normalize_keyword(keyword: str) -> str:
 
 def format_folder_name(name: str) -> str:
     """Format the folder name by capitalizing properly and handling special cases."""
-    # Apply special cases first
     name = normalize_keyword(name)
     for case, replacement in SPECIAL_CASES.items():
         if case in name:
@@ -34,45 +33,43 @@ def format_folder_name(name: str) -> str:
     name = ' '.join(word.capitalize() for word in name.split())
     return f"{name} Comics"
 
-def search_getcomics(keyword: str, page_number: int = 1) -> dict:
+def search_getcomics(keyword: str) -> dict:
     """Search GetComics for a keyword and return categorized links."""
-    search_url = SEARCH_URL_TEMPLATE.format(page_number, keyword.replace(' ', '+'))
-    print(f"Constructed URL: {search_url}")  # Debug print
+    search_url = SEARCH_URL_TEMPLATE.format(keyword.replace(' ', '+'))
+    print(f"Constructed URL: {search_url}")
 
     response = requests.get(search_url)
-    print(f"HTTP Status Code: {response.status_code}")  # Debug print
+    print(f"HTTP Status Code: {response.status_code}")
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, 'html.parser')
-    print(f"Page Title: {soup.title.string}")  # Debug print
+    print(f"Page Title: {soup.title.string}")
 
     links = soup.find_all('a', href=True)
-    print(f"Number of Links Found: {len(links)}")  # Debug print
+    print(f"Number of Links Found: {len(links)}")
 
     categorized_links = {}
     for link in links:
         href = link['href']
         text = link.get_text().strip()
 
-        # Check if the link contains the keyword in the text and is from the correct domain
         if 'getcomics.org' in href and keyword.lower() in text.lower():
             match = YEAR_PATTERN.search(href)
             if match:
                 year = match.group(0)
                 if year not in categorized_links:
                     categorized_links[year] = []
-                # Get size information
-                size = get_comic_size(href, keyword)
+                size = get_comic_size(href)
                 categorized_links[year].append({'text': text, 'href': href, 'size': size})
             else:
                 if 'Unknown' not in categorized_links:
                     categorized_links['Unknown'] = []
-                size = get_comic_size(href, keyword)
+                size = get_comic_size(href)
                 categorized_links['Unknown'].append({'text': text, 'href': href, 'size': size})
 
     return categorized_links
 
-def get_comic_size(link: str, keyword: str) -> str:
+def get_comic_size(link: str) -> str:
     """Get the size of a comic book."""
     response = requests.get(link)
     response.raise_for_status()
@@ -85,18 +82,15 @@ def get_comic_size(link: str, keyword: str) -> str:
         if size_match:
             return size_match.group(1)
     
-    # If size information is not found in <p> element, look for <li> tags
-    if 'vol' in keyword.lower():
-        download_list_items = soup.find_all("li")
-        for li in download_list_items:
-            if keyword.lower() in li.get_text().lower():
-                size_match = re.search(r'\(([\d.]+\s*MB)\)', li.get_text())
-                if size_match:
-                    return size_match.group(1)
+    download_list_items = soup.find_all("li")
+    for li in download_list_items:
+        size_match = re.search(r'\(([\d.]+\s*MB)\)', li.get_text())
+        if size_match:
+            return size_match.group(1)
     
     return 'Unknown'
 
-def get_download_links(link: str, keyword: str) -> list:
+def get_download_links(link: str) -> list:
     """Get download links from a comic page."""
     response = requests.get(link)
     response.raise_for_status()
@@ -104,14 +98,16 @@ def get_download_links(link: str, keyword: str) -> list:
     soup = BeautifulSoup(response.text, 'html.parser')
     download_links = []
 
-    # Check all <li> elements for any download links
-    download_list_items = soup.find_all("li")
-    for li in download_list_items:
-        if keyword.lower() in li.get_text().lower():
-            links = li.find_all('a', href=True)
-            for link in links:
-                if 'Main Server' in link.get_text(strip=True):
-                    download_links.append(link['href'])
+    link_elements = soup.find_all("a", href=True)
+    for a in link_elements:
+        # For single download links
+        if a['href'].startswith("https://getcomics.org/dlds/") and a.get('title') == 'Download Now':
+            download_links.append(a['href'])
+        
+        # For multiple download links (volumes)
+        span = a.find("span", style="color: #ff0000;")
+        if span and span.get_text().strip() == "Main Server":
+            download_links.append(a['href'])
 
     return download_links
 
@@ -122,17 +118,59 @@ def download_with_aria2c(url: str, output_dir: str = '.') -> None:
     command = ['aria2c', '-d', output_dir, url]
     subprocess.run(command)
 
+def generate_variations(keyword: str) -> list:
+    """Generate variations of the keyword by adding/removing 's'."""
+    words = keyword.split()
+    variations = set()
+    
+    # Add original keyword
+    variations.add(keyword)
+
+    # Generate plural and singular variations
+    for word in words:
+        if word.endswith('s'):
+            singular = word[:-1]
+            variations.add(keyword.replace(word, singular))
+        else:
+            plural = word + 's'
+            variations.add(keyword.replace(word, plural))
+
+    return list(variations)
+
+def search_multiple_keywords(keyword: str) -> dict:
+    """Search GetComics for a keyword, its individual words, and their variations, returning categorized links."""
+    keywords = keyword.split()
+    all_categorized_links = {}
+
+    # Search for the full keyword and its variations
+    keyword_variations = generate_variations(keyword)
+    for kw in keyword_variations:
+        kw_links = search_getcomics(kw)
+        for year, links in kw_links.items():
+            if year not in all_categorized_links:
+                all_categorized_links[year] = []
+            all_categorized_links[year].extend(links)
+
+    # Search for individual words and their variations
+    for word in keywords:
+        word_variations = generate_variations(word)
+        for wv in word_variations:
+            word_links = search_getcomics(wv)
+            for year, links in word_links.items():
+                if year not in all_categorized_links:
+                    all_categorized_links[year] = []
+                all_categorized_links[year].extend(links)
+
+    return all_categorized_links
+
 def main() -> None:
     """Main program entry point."""
     parser = argparse.ArgumentParser(description="Search GetComics for a keyword and return all matching links categorized by year.")
     parser.add_argument('keyword', type=str, help="The keyword to search for.")
-    parser.add_argument('-p', '--page', type=int, default=1, help="The page number to search on.")
     args = parser.parse_args()
 
     keyword = normalize_keyword(args.keyword)
-    page_number = args.page
-
-    categorized_links = search_getcomics(keyword, page_number)
+    categorized_links = search_multiple_keywords(keyword)
 
     comics = []
     for year, links in categorized_links.items():
@@ -158,22 +196,24 @@ def main() -> None:
 
         confirm_download = input("Confirm download (Y/n): ").strip().lower()
         if confirm_download in ['', 'y']:
-            download_links = get_download_links(selected_comic['href'], keyword)
+            download_links = get_download_links(selected_comic['href'])
             if download_links:
                 formatted_links = [
                     f"{selected_comic['text']} Vol {idx+1}: {link}" for idx, link in enumerate(download_links)
                 ]
                 print("Download links found:")
-                for link in formatted_links:
-                    print(link)
-                input("\nPress Enter to start the download...")
+                for idx, link in enumerate(formatted_links, start=1):
+                    print(f"{idx}. {link}")
 
-                # Extract the comic name for folder creation
-                comic_name = ' '.join(selected_comic['text'].split()[:2])  # Assume first two words are the series name
+                chosen_volumes = input("\nEnter the numbers of the volumes you want to download (comma separated): ").strip()
+                chosen_indices = [int(i) for i in chosen_volumes.split(',') if i.isdigit()]
+
+                comic_name = ' '.join(selected_comic['text'].split()[:2])
                 output_dir = os.path.join("Comic Book", format_folder_name(comic_name))
 
-                for dl in download_links:
-                    download_with_aria2c(dl, output_dir)
+                for idx in chosen_indices:
+                    if 1 <= idx <= len(download_links):
+                        download_with_aria2c(download_links[idx - 1], output_dir)
                 print("Download completed.")
             else:
                 print("Download links not found.")
